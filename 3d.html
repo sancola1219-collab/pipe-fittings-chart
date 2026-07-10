@@ -6,26 +6,58 @@
 <title>管件查詢圖鑑 3D</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  /* 3D 頁專用 */
-  #stage{width:100%; height:100%; display:block; touch-action:none;}
+  /* 3D 頁專用（自寫軟體渲染，零依賴，深色檢視台） */
+  #canvasWrap{background:#0b1220;}
+  #stage{width:100%; height:100%; display:block; touch-action:none; cursor:grab;}
+  #stage.drag{cursor:grabbing;}
+  #fitBar{
+    display:flex; gap:4px; overflow-x:auto; padding:6px 14px;
+    background:#fff; border-bottom:1px solid #dde3e9;
+  }
+  #fitBar button{
+    border:1px solid #c7d0d9; background:#fff; border-radius:6px; white-space:nowrap;
+    padding:4px 10px; font-size:13px; cursor:pointer; font-family:inherit; flex:0 0 auto;
+  }
+  #fitBar button:hover{border-color:var(--accent);}
+  #fitBar button.on{background:var(--accent); color:#fff; border-color:var(--accent); font-weight:bold;}
+  #infoLine{
+    position:absolute; left:0; right:0; top:0; padding:10px 16px;
+    color:#e8eef6; font-size:13px; line-height:1.5; pointer-events:none;
+    background:linear-gradient(#0b1220ee,#0b122000);
+  }
+  #infoLine b{color:#ffce6b; font-size:15px;}
+  #v3dctl{position:absolute; right:14px; bottom:14px; display:flex; flex-direction:column; gap:6px;}
+  #v3dctl button{
+    min-width:40px; height:34px; padding:0 10px; border-radius:8px; border:1px solid #33415a;
+    background:#1a2536; color:#dbe4f0; font-size:13px; cursor:pointer;
+  }
+  #v3dctl button.on{background:var(--accent); border-color:var(--accent); color:#fff;}
+  #hint{background:rgba(20,30,45,.85); color:#9fb0c4;}
 </style>
 </head>
 <body>
 <header>
   <div>
     <h1>管件查詢圖鑑 3D</h1>
-    <div class="sub">PIPE FITTINGS 3D VIEWER</div>
+    <div class="sub">TRUE-SCALE 3D VIEWER</div>
   </div>
   <div id="sizeBar"></div>
   <button class="toolBtn" id="btnTable">管徑對照表</button>
-  <button class="toolBtn" id="btnSpin">🔄 自動旋轉</button>
-  <button class="toolBtn" id="btnReset">⤢ 回全景</button>
   <a class="toolBtn" href="index.html">📐 2D 圖鑑</a>
 </header>
+<div id="fitBar"></div>
 <div id="main">
   <div id="canvasWrap">
     <canvas id="stage"></canvas>
-    <div id="hint">單指/左鍵拖曳＝旋轉｜雙指/滾輪＝縮放｜點管件看說明｜雙擊聚焦</div>
+    <div id="infoLine"></div>
+    <div id="v3dctl">
+      <button id="btnDims" class="on" title="尺寸標註開關">尺寸</button>
+      <button id="btnSpin" class="on" title="自動旋轉">旋轉</button>
+      <button id="btnReset" title="回正">回正</button>
+      <button id="zin" title="放大">＋</button>
+      <button id="zout" title="縮小">－</button>
+    </div>
+    <div id="hint">拖曳＝旋轉｜滾輪/雙指＝縮放｜上方選管件與口徑｜尺寸鈕可開關標註</div>
   </div>
   <aside id="panel"></aside>
 </div>
@@ -40,368 +72,522 @@
   </div>
 </div>
 
-<script src="lib/three.min.js"></script>
-<script src="lib/OrbitControls.js"></script>
 <script src="data.js"></script>
 <script>
 /* ═══════════════════════════════════════════════════════════════
-   3D 檢視 —— 15 個管件模型排成 5×3 展示台，OrbitControls 旋轉縮放
-   （資料 SIZES / FITTINGS / panelHTML 在 data.js，與 2D 共用）
+   3D 管件檢視器 —— 自寫軟體渲染（painter's algorithm），零依賴
+   幾何依 SIZES 的真實 mm（外徑/壁厚/B16.9 長度）生成，切換口徑即重建
+   尺寸線與角度弧投影到畫面上，隨旋轉更新（技法沿用「螺牙查詢」3D）
+   資料 SIZES/FITTINGS/BW/panelHTML 皆在 data.js（2D/3D 共用）
 ═══════════════════════════════════════════════════════════════ */
-let selSize = SIZES.find(s=>s.key==='2');
+let selSize = SIZES.find(s=>s.key==='2');   // 預設 2 吋
 let selFit  = 'elbow90';
+let showDims = true;
 
 const canvas = document.getElementById('stage');
-const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xf4f6f8);
-const camera = new THREE.PerspectiveCamera(45, 2, 0.1, 300);
-camera.position.set(0, 18, 34);
-const controls = new THREE.OrbitControls(camera, canvas);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-controls.maxDistance = 90;
-controls.minDistance = 3;
+const ctx = canvas.getContext('2d');
+const view = { rx:-0.42, ry:0.7, zoom:1, auto:true, timer:0 };
+let model = null, modelInfo = '';
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.05));
-const sun = new THREE.DirectionalLight(0xffffff, 0.9);
-sun.position.set(12, 24, 14);
-scene.add(sun);
-
-/* ── 材質（每次呼叫都給新實例，避免共用材質互相干擾） ── */
-const matSteel = () => new THREE.MeshStandardMaterial({color:0xb9c6d2, metalness:.62, roughness:.4});
-const matBody  = () => new THREE.MeshStandardMaterial({color:0x9db0c0, metalness:.55, roughness:.5});
-const matDarkM = () => new THREE.MeshStandardMaterial({color:0x2f3d4a, metalness:.3, roughness:.7});
-
-/* ── 幾何小工具 ── */
-const Y = new THREE.Vector3(0,1,0), Z = new THREE.Vector3(0,0,1);
-function tube(p1, p2, r, mat){          // 兩點之間的圓管
-  const a = new THREE.Vector3(...p1), b = new THREE.Vector3(...p2);
-  const dir = new THREE.Vector3().subVectors(b,a), len = dir.length();
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(r,r,len,24), mat||matSteel());
-  m.position.copy(a).addScaledVector(dir,.5);
-  m.quaternion.setFromUnitVectors(Y, dir.normalize());
-  return m;
+/* ── 材質底色（滿光時 RGB，著色時再乘明暗） ── */
+const TINTS = {
+  steel:  {out:[205,220,236], bore:[104,120,140]},
+  galv:   {out:[200,206,214], bore:[104,112,122]},   // 瑪鋼鍍鋅
+  brass:  {out:[214,186,112], bore:[150,120,58]},
+  pvc:    {out:[224,228,234], bore:[150,162,176]},
+};
+let curTint = TINTS.steel;
+function tintFor(f){
+  const m = (f.mats && f.mats[0]) || '';
+  if(m.includes('青銅')||m.includes('黃銅')) return TINTS.brass;
+  if(m.includes('PVC')) return TINTS.pvc;
+  if(m.includes('瑪鋼')) return TINTS.galv;
+  return TINTS.steel;
 }
-function hexX(r, h, x){                 // 軸向 X 的六角
-  const m = new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,6), matBody());
-  m.rotation.z = Math.PI/2; m.position.x = x;
-  return m;
+
+/* ═══════════════ 幾何工具（單位＝真實 mm，主軸＝X） ═══════════════ */
+const SEG = 46;                        // 圓周分段
+function ringPts(x, r, cy=0, cz=0){
+  const a = [];
+  for(let i=0;i<=SEG;i++){ const th=2*Math.PI*i/SEG; a.push([x, cy+r*Math.cos(th), cz+r*Math.sin(th)]); }
+  return a;
 }
-function ringsX(x1, x2, r, y=0){        // 沿 X 軸的一排螺紋環
-  const g = new THREE.Group(), n = 5;
-  for(let i=0;i<n;i++){
-    const m = new THREE.Mesh(new THREE.TorusGeometry(r, .045, 8, 28), matBody());
-    m.rotation.y = Math.PI/2;
-    m.position.set(x1 + (x2-x1)*i/(n-1), y, 0);
-    g.add(m);
+function quadStrip(m, ringA, ringB, tint){
+  for(let i=0;i<SEG;i++)
+    m.q.push({v:[ringA[i], ringB[i], ringB[i+1], ringA[i+1]], t:tint});
+}
+// 環形端面（外環 ro 到內環 ri，露出壁厚）
+function endRing(m, x, ro, ri, tint, cy=0, cz=0){
+  const A=ringPts(x,ro,cy,cz), B=ringPts(x,ri,cy,cz);
+  quadStrip(m, A, B, tint);
+}
+// 空心管：外壁＋內孔＋兩端環面
+function tube(m, x0, x1, ro, ri, o={}){
+  const tO=o.out||curTint.out, tB=o.bore||curTint.bore;
+  quadStrip(m, ringPts(x0,ro), ringPts(x1,ro), tO);       // 外壁
+  quadStrip(m, ringPts(x0,ri), ringPts(x1,ri), tB);       // 內孔
+  if(o.cap0!==false) endRing(m, x0, ro, ri, tB);          // 端面環（露壁厚）
+  if(o.cap1!==false) endRing(m, x1, ro, ri, tB);
+}
+// 空心錐（大小頭）：可偏心（cyFn 給每個 x 的中心 y）
+function cone(m, x0, x1, ro0, ro1, t, o={}){
+  const tO=o.out||curTint.out, tB=o.bore||curTint.bore;
+  const N=1, cyFn=o.cyFn||(()=>0);
+  const A0o=ringPts(x0,ro0,cyFn(x0)), A1o=ringPts(x1,ro1,cyFn(x1));
+  quadStrip(m, A0o, A1o, tO);
+  const A0i=ringPts(x0,ro0-t,cyFn(x0)), A1i=ringPts(x1,ro1-t,cyFn(x1));
+  quadStrip(m, A0i, A1i, tB);
+  endRing(m, x0, ro0, ro0-t, tB, cyFn(x0));
+  endRing(m, x1, ro1, ro1-t, tB, cyFn(x1));
+}
+// 橢圓封頭（2:1），從 xBase 沿 +dir 長 hgt，底半徑 r
+function dome(m, xBase, dir, r, hgt, t, o={}){
+  const tO=o.out||curTint.out, tB=o.bore||curTint.bore, N=14;
+  let prevO=ringPts(xBase, r), prevI=ringPts(xBase, r-t);
+  for(let k=1;k<=N;k++){
+    const ph=Math.PI/2*k/N, x=xBase+dir*hgt*Math.sin(ph), rr=r*Math.cos(ph);
+    const curO=ringPts(x, Math.max(rr,0.001)), curI=ringPts(x, Math.max(rr-t,0.0005));
+    quadStrip(m, prevO, curO, tO); quadStrip(m, prevI, curI, tB);
+    prevO=curO; prevI=curI;
   }
-  return g;
 }
-function arcPipe(R, r, arc){            // XY 平面圓弧管（彎頭本體）
-  return new THREE.Mesh(new THREE.TorusGeometry(R, r, 20, 32, arc), matSteel());
+// 六角柱（螺帽/頭），af＝對邊距
+function hex(m, x0, x1, af, tint){
+  const R=af/Math.sqrt(3), t=tint||curTint.out;
+  const ring=x=>{ const a=[]; for(let i=0;i<=6;i++){ const th=Math.PI/6+2*Math.PI*i/6; a.push([x, R*Math.cos(th), R*Math.sin(th)]); } return a; };
+  const A=ring(x0), B=ring(x1);
+  for(let i=0;i<6;i++) m.q.push({v:[A[i],B[i],B[i+1],A[i+1]], t});
+  const c0=[x0,0,0], c1=[x1,0,0];
+  for(let i=0;i<6;i++){ m.q.push({v:[c0,A[i],A[i+1],A[i]], t}); m.q.push({v:[c1,B[i+1],B[i],B[i+1]], t}); }
 }
-
-/* ── 各管件 3D 模型（單位約 ±2 的盒子內） ── */
-const BUILD3D = {
-  elbow90(){
-    const g = new THREE.Group();
-    g.add(arcPipe(1.3,.55,Math.PI/2));
-    g.add(tube([1.3,0,0],[1.3,-1.1,0],.55));
-    g.add(tube([0,1.3,0],[-1.1,1.3,0],.55));
-    g.position.set(-0.1,-0.5,0);
-    return g;
-  },
-  elbow45(){
-    const g = new THREE.Group();
-    g.add(arcPipe(1.3,.55,Math.PI/4));
-    g.add(tube([1.3,0,0],[1.3,-1.3,0],.55));
-    const c=Math.cos(Math.PI/4), s=Math.sin(Math.PI/4);
-    g.add(tube([1.3*c,1.3*s,0],[1.3*c-1.3*s*0.92, 1.3*s+1.3*c*0.92, 0],.55));
-    g.rotation.z = Math.PI/8; g.position.y = -0.6;
-    return g;
-  },
-  tee(){
-    const g = new THREE.Group();
-    g.add(tube([-1.7,0,0],[1.7,0,0],.55));
-    g.add(tube([0,0,0],[0,1.5,0],.55));
-    g.position.y = -0.3;
-    return g;
-  },
-  rtee(){
-    const g = new THREE.Group();
-    g.add(tube([-1.7,0,0],[1.7,0,0],.55));
-    g.add(tube([0,0,0],[0,1.5,0],.34));
-    g.position.y = -0.3;
-    return g;
-  },
-  creducer(){
-    const g = new THREE.Group();
-    g.add(tube([-1.7,0,0],[-0.68,0,0],.6));
-    const cone = new THREE.Mesh(new THREE.CylinderGeometry(.36,.6,1.4,24), matSteel());
-    cone.rotation.z = -Math.PI/2;
-    g.add(cone);
-    g.add(tube([0.68,0,0],[1.7,0,0],.36));
-    return g;
-  },
-  ereducer(){
-    const g = new THREE.Group();
-    g.add(tube([-1.7,0,0],[-0.68,0,0],.6));
-    const cone = new THREE.Mesh(new THREE.CylinderGeometry(.36,.6,1.4,24), matSteel());
-    cone.rotation.z = -Math.PI/2 + Math.atan2(.24,1.4);
-    cone.position.y = -0.12;
-    g.add(cone);
-    const st = tube([0.68,-0.24,0],[1.7,-0.24,0],.36);
-    g.add(st);
-    return g;
-  },
-  cap(){
-    const g = new THREE.Group();
-    g.add(tube([-1.2,0,0],[0.25,0,0],.6));
-    const dome = new THREE.Mesh(new THREE.SphereGeometry(.6,24,14,0,Math.PI*2,0,Math.PI/2), matSteel());
-    dome.rotation.z = -Math.PI/2; dome.position.x = 0.25;
-    g.add(dome);
-    return g;
-  },
-  union(){
-    const g = new THREE.Group();
-    g.add(tube([-1.9,0,0],[-1.0,0,0],.45));
-    g.add(tube([-1.05,0,0],[-0.34,0,0],.62,matBody()));
-    g.add(hexX(.9,.62,0));
-    g.add(tube([0.34,0,0],[1.05,0,0],.62,matBody()));
-    g.add(tube([1.0,0,0],[1.9,0,0],.45));
-    return g;
-  },
-  coupling(){
-    const g = new THREE.Group();
-    g.add(tube([-1.8,0,0],[-0.85,0,0],.5));
-    g.add(tube([-0.9,0,0],[0.9,0,0],.72,matBody()));
-    [-0.82,0.82].forEach(x=>{
-      const rim = new THREE.Mesh(new THREE.TorusGeometry(.72,.06,10,30), matBody());
-      rim.rotation.y = Math.PI/2; rim.position.x = x;
-      g.add(rim);
-    });
-    g.add(tube([0.85,0,0],[1.8,0,0],.5));
-    return g;
-  },
-  nipple(){
-    const g = new THREE.Group();
-    g.add(tube([-1.4,0,0],[1.4,0,0],.5));
-    g.add(ringsX(-1.32,-0.78,.52));
-    g.add(ringsX(0.78,1.32,.52));
-    return g;
-  },
-  bushing(){
-    const g = new THREE.Group();
-    g.add(tube([-0.95,0,0],[-0.26,0,0],.75,matBody()));
-    g.add(ringsX(-0.88,-0.36,.77));
-    g.add(hexX(.95,.55,0));
-    g.add(tube([0.26,0,0],[0.9,0,0],.4));
-    return g;
-  },
-  plug(){
-    const g = new THREE.Group();
-    g.add(hexX(.8,.5,-0.55));
-    const shank = new THREE.Mesh(new THREE.CylinderGeometry(.5,.57,1.1,24), matSteel());
-    shank.rotation.z = -Math.PI/2; shank.position.x = 0.25;
-    g.add(shank);
-    g.add(ringsX(-0.1,0.65,.56));
-    return g;
-  },
-  flange(){
-    const g = new THREE.Group();
-    const disc = new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,.34,40), matSteel());
-    disc.rotation.z = Math.PI/2;
-    g.add(disc);
-    const hub = new THREE.Mesh(new THREE.CylinderGeometry(.78,.78,.5,28), matSteel());
-    hub.rotation.z = Math.PI/2; hub.position.x = .4;
-    g.add(hub);
-    g.add(tube([0.6,0,0],[1.7,0,0],.55));
-    const bore = new THREE.Mesh(new THREE.CylinderGeometry(.42,.42,.4,24), matDarkM());
-    bore.rotation.z = Math.PI/2; bore.position.x = -0.05;
-    g.add(bore);
-    for(let i=0;i<4;i++){
-      const a = Math.PI/4 + i*Math.PI/2;
-      const bolt = new THREE.Mesh(new THREE.CylinderGeometry(.13,.13,.42,16), matDarkM());
-      bolt.rotation.z = Math.PI/2;
-      bolt.position.set(0, 1.1*Math.sin(a), 1.1*Math.cos(a));
-      g.add(bolt);
+// 螺紋圓柱（外牙示意，沿用螺牙 3D 的三角波；taperR 前端漸細）
+// 用自己較低的圓周解析度 TSEG，牙紋是裝飾不需高解析，維持手機順暢
+function thread(m, x0, x1, r, o={}){
+  const tint=o.tint||curTint.out, p=o.pitch||2.0, depth=Math.min(r*0.16, p*0.55);
+  const taperR=o.taper?1/32:0, TSEG=28, NZ=Math.min(46, Math.max(14, Math.round((x1-x0)/p*5)));
+  let prev=null;
+  for(let iz=0;iz<=NZ;iz++){
+    const x=x0+(x1-x0)*iz/NZ, Rb=r - taperR*(x1-x);
+    const row=[];
+    for(let it=0;it<=TSEG;it++){
+      const th=2*Math.PI*it/TSEG;
+      let ph=((x/p) - th/(2*Math.PI))%1; if(ph<0)ph+=1;
+      let tw=Math.abs(ph*2-1); tw=Math.min(1,Math.max(0,(tw-0.15)/0.7));
+      const rr=Rb-depth*(1-tw);
+      row.push([x, rr*Math.cos(th), rr*Math.sin(th)]);
     }
-    return g;
-  },
-  cross(){
-    const g = new THREE.Group();
-    g.add(tube([-1.7,0,0],[1.7,0,0],.55));
-    g.add(tube([0,-1.5,0],[0,1.5,0],.55));
-    return g;
-  },
-  stelbow(){
-    const g = new THREE.Group();
-    g.add(arcPipe(1.3,.55,Math.PI/2));
-    g.add(tube([1.3,0,0],[1.3,-1.1,0],.55));
-    for(let i=0;i<5;i++){           // 外牙端的牙環（垂直軸，手動放）
-      const m = new THREE.Mesh(new THREE.TorusGeometry(.57,.045,8,28), matBody());
-      m.rotation.x = Math.PI/2;
-      m.position.set(1.3, -0.6 - i*0.12, 0);
-      g.add(m);
+    if(prev){ for(let it=0;it<TSEG;it++) m.q.push({v:[prev[it],row[it],row[it+1],prev[it+1]], t:tint}); }
+    prev=row;
+  }
+}
+// 彎管（中心線在 XY 平面，半徑 Rc，管外徑 ro，掃角 arc）
+function bend(m, Rc, ro, ri, arc, o={}){
+  const tO=o.out||curTint.out, tB=o.bore||curTint.bore;
+  const NA=Math.max(12, Math.round(arc/(Math.PI/2)*22));
+  const ringAt=(ph, rad)=>{
+    const P=[Rc*Math.sin(ph), Rc-Rc*Math.cos(ph), 0];
+    const T=[Math.cos(ph), Math.sin(ph), 0];        // 切線
+    const u=[-Math.sin(ph), Math.cos(ph), 0];       // 面內法線
+    const w=[0,0,1];
+    const a=[];
+    for(let i=0;i<=SEG;i++){ const ps=2*Math.PI*i/SEG, c=Math.cos(ps), sn=Math.sin(ps);
+      a.push([P[0]+rad*(c*u[0]+sn*w[0]), P[1]+rad*(c*u[1]+sn*w[1]), P[2]+rad*(c*u[2]+sn*w[2])]); }
+    return a;
+  };
+  let pO=ringAt(0,ro), pI=ringAt(0,ri);
+  for(let k=1;k<=NA;k++){
+    const ph=arc*k/NA, cO=ringAt(ph,ro), cI=ringAt(ph,ri);
+    quadStrip(m, pO, cO, tO); quadStrip(m, pI, cI, tB); pO=cO; pI=cI;
+  }
+  // 兩端露壁厚
+  const f0o=ringAt(0,ro),f0i=ringAt(0,ri),f1o=ringAt(arc,ro),f1i=ringAt(arc,ri);
+  for(let i=0;i<SEG;i++){ m.q.push({v:[f0o[i],f0i[i],f0i[i+1],f0o[i+1]],t:tB}); m.q.push({v:[f1o[i],f1i[i],f1i[i+1],f1o[i+1]],t:tB}); }
+}
+// 把一個 mesh 片段的頂點做 90° 繞 Z（+X 軸→+Y 軸）後併入
+function addRotZ90(m, sub){
+  for(const f of sub.q) m.q.push({v:f.v.map(p=>[-p[1],p[0],p[2]]), t:f.t});
+}
+// 建一支沿 +Y 的空心管（給三通/四通支管）
+function tubeY(m, y0, y1, ro, ri, o={}){
+  const sub={q:[]}; tube(sub, y0, y1, ro, ri, o); addRotZ90(m, sub);
+}
+
+/* ═══════════════ 尺寸/角度標註（模型座標，投影時畫） ═══════════════ */
+function dim(m,a,b,txt){ m.ann.push({k:'dim',a,b,txt}); }
+function diam(m,c,r,txt,ax){ m.ann.push({k:'diam',c,r,txt,ax:ax||'x'}); }
+function angle(m,v,a,b,txt){ m.ann.push({k:'angle',v,a,b,txt}); }
+function note(m,at,txt){ m.ann.push({k:'note',at,txt}); }
+
+/* ═══════════════ 每個管件的真實比例建模 ═══════════════ */
+const fx = v => (v==null?'—':(''+v));
+function pitchOf(od){ return od<24?1.337 : od<40?1.814 : 2.309; }
+function smallerOD(s){ const i=SIZES.indexOf(s); return (i>0?SIZES[i-1]:s); }
+
+const BUILD = {
+  elbow90(m,s){
+    const OD=s.aod, ro=OD/2, ri=ro-s.t, A=s.bw?s.bw[BW.ELBOW90]:1.5*(OD-s.t);
+    bend(m, A, ro, ri, Math.PI/2);
+    if(showDims){
+      dim(m,[A,0,0],[0,0,0],`A=${fx(A)}`);
+      dim(m,[A,0,0],[A,A,0],`A=${fx(A)}`);
+      angle(m,[A,0,0],[0,0,0],[A,A,0],'90°');
+      diam(m,[0,0,0],ro,`Ø${OD}`,'x');
+      dim(m,[0,ro,0],[0,ri,0],`t=${s.t}`);
     }
-    g.add(tube([0,1.3,0],[-1.1,1.3,0],.62,matBody()));
-    g.position.set(-0.1,-0.5,0);
-    return g;
+    return `<b>90° LR 彎頭</b>　中心至端面 A=${fx(A)}｜中心線彎曲半徑 R=${fx(A)}（1.5D）｜對焊外徑 Ø${OD}｜內徑 Ø${(OD-2*s.t).toFixed(1)}｜壁厚 t=${s.t}　mm（依真實比例生成）`;
+  },
+  elbow45(m,s){
+    const OD=s.aod, ro=OD/2, ri=ro-s.t, R=s.bw?s.bw[BW.ELBOW90]:1.5*(OD-s.t), B=s.bw?s.bw[BW.ELBOW45]:R*0.414;
+    bend(m, R, ro, ri, Math.PI/4);
+    // 端面點與兩臂中心線交點（corner）
+    const f2=[R*Math.sin(Math.PI/4), R-R*Math.cos(Math.PI/4), 0];
+    const cornerX = R*Math.sin(Math.PI/4) - R*(1-Math.cos(Math.PI/4))*Math.cos(Math.PI/4)/Math.sin(Math.PI/4);
+    const corner=[cornerX,0,0];
+    if(showDims){
+      dim(m,corner,[0,0,0],`B=${fx(B)}`);
+      angle(m,corner,[0,0,0],f2,'45°');
+      diam(m,[0,0,0],ro,`Ø${OD}`,'x');
+      note(m,[R*0.52, R*0.30,0],`R=${fx(R)}`);
+    }
+    return `<b>45° 彎頭</b>　中心至端面 B=${fx(B)}｜彎曲半徑 R=${fx(R)}（1.5D）｜對焊外徑 Ø${OD}｜壁厚 t=${s.t}　mm（依真實比例生成）`;
+  },
+  tee(m,s){
+    const OD=s.aod, ro=OD/2, ri=ro-s.t, C=s.bw?s.bw[BW.TEE]:1.1*OD;
+    tube(m,-C,C,ro,ri); tubeY(m,0,C,ro,ri);
+    if(showDims){
+      dim(m,[0,0,0],[C,0,0],`C=${fx(C)}`);
+      dim(m,[0,0,0],[0,C,0],`M=${fx(C)}`);
+      angle(m,[0,0,0],[C,0,0],[0,C,0],'90°');
+      diam(m,[C,0,0],ro,`Ø${OD}`,'x');
+      dim(m,[-C,ro,0],[-C,ri,0],`t=${s.t}`);
+    }
+    return `<b>正三通</b>　中心至管端 C=${fx(C)}｜中心至支管端 M=${fx(C)}｜三口外徑 Ø${OD}｜壁厚 t=${s.t}｜全長 2C=${fx(C*2)}　mm（依真實比例生成）`;
+  },
+  rtee(m,s){
+    const OD=s.aod, ro=OD/2, ri=ro-s.t, C=s.bw?s.bw[BW.TEE]:1.1*OD;
+    const bs=smallerOD(s), bro=bs.aod/2, bri=bro-bs.t;
+    tube(m,-C,C,ro,ri); tubeY(m,0,C*0.9,bro,bri);
+    if(showDims){
+      dim(m,[0,0,0],[C,0,0],`C=${fx(C)}`);
+      diam(m,[C,0,0],ro,`主 Ø${OD}`,'x');
+      note(m,[0,C*0.9,0],`支管 Ø/M 依組合`);
+    }
+    return `<b>異徑三通</b>　主管中心至端 C=${fx(C)}｜主管外徑 Ø${OD}｜壁厚 t=${s.t}｜支管 Ø 與 M 依「主×主×支」組合，無單一標準值（依真實比例生成）`;
+  },
+  cross(m,s){
+    const OD=s.aod, ro=OD/2, ri=ro-s.t, C=s.bw?s.bw[BW.TEE]:1.1*OD;
+    tube(m,-C,C,ro,ri); tubeY(m,-C,C,ro,ri);
+    if(showDims){
+      dim(m,[0,0,0],[C,0,0],`C=${fx(C)}`);
+      angle(m,[0,0,0],[C,0,0],[0,C,0],'90°');
+      diam(m,[C,0,0],ro,`Ø${OD}`,'x');
+    }
+    return `<b>四通</b>　中心至端面 C=${fx(C)}（四臂皆同）｜四口外徑 Ø${OD}｜壁厚 t=${s.t}｜每向全長 2C=${fx(C*2)}　mm（依真實比例生成）`;
+  },
+  creducer(m,s){
+    const OD=s.aod, ro=OD/2, H=s.bw?s.bw[BW.REDUCER]:1.2*OD;
+    const sm=smallerOD(s), sro=sm.aod/2;
+    cone(m, 0, H, ro, sro, s.t);
+    const inc=(2*Math.atan((ro-sro)/H)*180/Math.PI).toFixed(1);
+    if(showDims){
+      dim(m,[0,0,0],[H,0,0],`H=${fx(H)}`);
+      diam(m,[0,0,0],ro,`大 Ø${OD}`,'x');
+      diam(m,[H,0,0],sro,`小 Ø${sm.aod}`,'x');
+      note(m,[H*0.5, (ro+sro)/2+ro*0.15, 0],`錐角≈${inc}°`);
+    }
+    return `<b>同心大小頭</b>　全長 H=${fx(H)}｜大端 Ø${OD} → 小端 Ø${sm.aod}（例 ${s.b}×${sm.b}）｜壁厚 t=${s.t}｜含錐角≈${inc}°　mm（依真實比例生成）`;
+  },
+  ereducer(m,s){
+    const OD=s.aod, ro=OD/2, H=s.bw?s.bw[BW.REDUCER]:1.2*OD;
+    const sm=smallerOD(s), sro=sm.aod/2, e=(ro-sro);
+    // 底邊齊平：每個 x 的半徑線性、中心 y 抬升使底部 y=-ro 不變
+    const rAt=x=>ro+(sro-ro)*x/H;
+    cone(m, 0, H, ro, sro, s.t, {cyFn:x=>(-ro+rAt(x))});
+    if(showDims){
+      dim(m,[0,0,0],[H,0,0],`H=${fx(H)}`);
+      diam(m,[0,0,0],ro,`大 Ø${OD}`,'x');
+      note(m,[H*0.55,-ro*0.9,0],`底邊齊平 · 偏心 e=${e.toFixed(1)}`);
+    }
+    return `<b>偏心大小頭</b>　全長 H=${fx(H)}｜大端 Ø${OD} → 小端 Ø${sm.aod}｜偏心 e=(D−d)/2=${e.toFixed(1)}｜一側管壁齊平｜壁厚 t=${s.t}　mm（依真實比例生成）`;
+  },
+  cap(m,s){
+    const OD=s.aod, ro=OD/2, ri=ro-s.t, E=s.bw?s.bw[BW.CAP]:0.6*OD;
+    const domeH=Math.min(OD/4, E*0.6), skirt=Math.max(E-domeH, s.t);
+    tube(m,0,skirt,ro,ri,{cap1:false});
+    dome(m, skirt, 1, ro, domeH, s.t);
+    if(showDims){
+      dim(m,[0,0,0],[E,0,0],`E=${fx(E)}`);
+      diam(m,[0,0,0],ro,`Ø${OD}`,'x');
+      dim(m,[0,ro,0],[0,ri,0],`t=${s.t}`);
+    }
+    return `<b>管帽（對焊）</b>　端面至頂點 E=${fx(E)}｜外徑 Ø${OD}｜壁厚 t=${s.t}｜2:1 橢圓封頭　mm（依真實比例生成）`;
+  },
+  union(m,s){
+    const od=s.od, r=od/2, body=r*1.28, af=od*1.55, hw=od*0.34, bl=od*0.55, st=od*0.6, p=pitchOf(od);
+    hex(m,-hw,hw,af);
+    tube(m,-hw-bl,-hw,body,r*0.9); tube(m,hw,hw+bl,body,r*0.9);
+    thread(m,-hw-bl-st,-hw-bl,r, {pitch:p,taper:true}); thread(m,hw+bl,hw+bl+st,r,{pitch:p,taper:true});
+    if(showDims){
+      diam(m,[-hw-bl-st,0,0],r,`Ø${od}`,'x');
+      note(m,[0,af*0.62,0],`活動螺帽`);
+      note(m,[hw+bl+st,r*1.1,0],`R ${s.b} 錐牙 1:16`);
+    }
+    return `<b>由令（活接頭）</b>　接管外徑 Ø${od}｜牙規 R/Rc ${s.b}（錐牙 1:16）｜全長依廠牌（牙口件無統一標準長度）（示意比例，管徑真實）`;
+  },
+  coupling(m,s){
+    const od=s.od, r=od/2, body=r*1.32, L=od*0.85, st=od*0.55, p=pitchOf(od);
+    tube(m,-L,L,body,r*0.86,{cap0:false,cap1:false});
+    thread(m,-L-st,-L,r,{pitch:p,taper:true}); thread(m,L,L+st,r,{pitch:p,taper:true});
+    if(showDims){
+      diam(m,[-L-st,0,0],r,`Ø${od}`,'x');
+      note(m,[0,body*1.05,0],`內牙×內牙`);
+    }
+    return `<b>束節（管接頭）</b>　接管外徑 Ø${od}｜內牙 Rc ${s.b}（PT）｜兩支同徑管對接｜長度依廠牌（示意比例，管徑真實）`;
+  },
+  nipple(m,s){
+    const od=s.od, r=od/2, ri=r-s.t, L=Math.max(od*1.6,90), st=od*0.5, p=pitchOf(od);
+    tube(m,-L/2,L/2,r,ri,{cap0:false,cap1:false});
+    thread(m,-L/2,-L/2+st,r,{pitch:p,taper:true}); thread(m,L/2-st,L/2,r,{pitch:p,taper:true});
+    if(showDims){
+      diam(m,[0,0,0],r,`Ø${od}`,'x');
+      dim(m,[-L/2,0,0],[L/2,0,0],`L 依訂製`);
+      note(m,[L/2-st, r*1.1,0],`R ${s.b} 雙頭外牙`);
+    }
+    return `<b>短節（雙頭牙）</b>　外徑 Ø${od}（真實 SGP）｜壁厚 t=${s.t}｜內徑 Ø${(od-2*s.t).toFixed(1)}｜牙規 R ${s.b}｜全長 L 叫料指定（常見 40–150，非標準值）`;
+  },
+  bushing(m,s){
+    const od=s.od, r=od/2, sm=smallerOD(s), sr=sm.od/2, af=od*1.42, L=od*0.62, hw=od*0.24, p=pitchOf(od);
+    hex(m,-hw,hw,af);
+    thread(m,hw,hw+L,r,{pitch:p,taper:true});
+    // 內牙小孔（示意）：一段窄內管
+    tube(m,-hw,hw+L, r*0.999, sr, {cap0:false,cap1:false, out:curTint.out, bore:curTint.bore});
+    if(showDims){
+      diam(m,[hw+L,0,0],r,`外牙 Ø${od}`,'x');
+      diam(m,[-hw,0,0],sr,`內牙孔 Ø${sm.od}`,'x');
+      note(m,[0,af*0.6,0],`六角`);
+    }
+    return `<b>補芯（布司）</b>　外牙 R ${s.b}（Ø${od}）× 內牙 Rp ${sm.b}（孔 Ø${sm.od}）｜錐牙 1:16｜長度依廠牌（示意比例，管徑真實）`;
+  },
+  plug(m,s){
+    const od=s.od, r=od/2, af=od*1.35, hw=od*0.28, L=od*0.72, p=pitchOf(od);
+    hex(m,-hw,hw,af);
+    thread(m,hw,hw+L,r,{pitch:p,taper:true});
+    endRing(m, hw+L, r, 0.001, curTint.out);              // 封住外端（實心塞頭）
+    if(showDims){
+      diam(m,[hw+L,0,0],r,`Ø${od}`,'x');
+      note(m,[0,af*0.6,0],`六角頭`);
+      note(m,[hw+L*0.5, r*1.05,0],`R ${s.b} 錐牙`);
+    }
+    return `<b>管塞</b>　外牙 R ${s.b}（Ø${od}）｜錐牙 1:16｜鎖進內牙管口封閉｜長度依廠牌（示意比例，管徑真實）`;
+  },
+  flange(m,s){
+    const od=s.od, r=od/2, ri=r-s.t, neck=od*0.5, discOD=od*2.55, dr=discOD/2, th=od*0.27, pcd=od*2.0, nb=4, bh=od*0.16;
+    tube(m,-neck,0,r,ri,{cap1:false});                       // 接管頸
+    // 法蘭盤（示意）
+    endRing(m, 0, dr, r, curTint.out);
+    quadStrip(m, ringPts(0,dr), ringPts(th,dr), curTint.out);
+    endRing(m, th, dr, ri, curTint.out);
+    tube(m,0,th,ri+0.001,ri,{cap0:false,cap1:false});
+    // 螺栓孔（挖不了，畫深色短管示意）
+    for(let i=0;i<nb;i++){ const a=Math.PI/4+i*Math.PI/2, cy=(pcd/2)*Math.cos(a), cz=(pcd/2)*Math.sin(a);
+      const A=ringPts(0,bh,cy,cz).map(p=>p), B=ringPts(th,bh,cy,cz);
+      quadStrip(m, A, B, curTint.bore); }
+    if(showDims){
+      diam(m,[-neck,0,0],r,`接管 Ø${od}`,'x');
+      note(m,[0, dr*0.72, 0],`外徑/PCD/孔 依10K查表`);
+    }
+    return `<b>法蘭</b>　接管外徑 Ø${od}（真實）｜壁厚 t=${s.t}｜法蘭外徑、厚度、PCD、螺栓孔數 依 JIS 10K／ASME Class150 查表（盤面為示意，非真實比例）`;
+  },
+  stelbow(m,s){
+    const od=s.od, r=od/2, ri=r-s.t, Rc=od*1.25, st=od*0.55, p=pitchOf(od);
+    bend(m, Rc, r, ri, Math.PI/2);
+    // 一端外牙（沿 −X 從面 (0,0,0) 往外）
+    thread(m,-st,0,r,{pitch:p,taper:true});
+    // 另一端內牙承口（沿 +Y 從面 (Rc,Rc,0) 往外）：加粗套筒
+    const socket=y=>{ const a=[],rad=r*1.22; for(let i=0;i<=SEG;i++){const th=2*Math.PI*i/SEG; a.push([Rc+rad*Math.cos(th), Rc+y, rad*Math.sin(th)]);} return a; };
+    const socI=y=>{ const a=[]; for(let i=0;i<=SEG;i++){const th=2*Math.PI*i/SEG; a.push([Rc+r*Math.cos(th), Rc+y, r*Math.sin(th)]);} return a; };
+    quadStrip(m, socket(0), socket(st), curTint.out);
+    quadStrip(m, socI(0), socI(st), curTint.bore);
+    for(let i=0;i<SEG;i++) m.q.push({v:[socket(st)[i],socI(st)[i],socI(st)[i+1],socket(st)[i+1]],t:curTint.bore});
+    if(showDims){
+      diam(m,[-st,0,0],r,`Ø${od}`,'x');
+      angle(m,[Rc,0,0],[0,0,0],[Rc,Rc,0],'90°');
+      note(m,[Rc*0.5,Rc*0.32,0],`R×Rp ${s.b}`);
+    }
+    return `<b>內外彎（街彎）</b>　接管外徑 Ø${od}｜一端外牙 R × 一端內牙 Rp（${s.b}）｜90° 轉向｜中心至端面依廠牌（示意比例，管徑真實）`;
   },
 };
 
-/* ── 文字標籤（Sprite，永遠面向鏡頭） ── */
-function makeLabel(line1, line2){
-  const c = document.createElement('canvas');
-  c.width = 720; c.height = 210;
-  const x = c.getContext('2d');
-  x.textAlign = 'center';
-  x.fillStyle = '#2c3e50';
-  x.font = 'bold 58px "Microsoft JhengHei", sans-serif';
-  x.fillText(line1, 360, 78);
-  x.fillStyle = '#c0392b';
-  x.font = 'bold 50px "Microsoft JhengHei", sans-serif';
-  x.fillText(line2, 360, 165);
-  const tex = new THREE.CanvasTexture(c);
-  const spr = new THREE.Sprite(new THREE.SpriteMaterial({map:tex, transparent:true, depthTest:false}));
-  spr.renderOrder = 999;            // 標籤永遠可讀，不被座台/模型遮住
-  spr.scale.set(7.2, 2.1, 1);
-  return spr;
-}
-function dimText(f){
-  const i = SIZES.indexOf(selSize);
-  const vals = f.dimGet(selSize, i);
-  if(!vals) return '此口徑無對焊標準值';
-  return f.dimCols.map((c,j)=>{
-    const v = vals[j];
-    return (typeof v === 'string') ? v : `${c.split(' ')[0]}=${v}`;
-  }).join('　') + '（mm）';
+/* ═══════════════ 建模＋置中 ═══════════════ */
+function buildModel(){
+  const f=FITTINGS.find(x=>x.id===selFit); curTint=tintFor(f);
+  const m={q:[],ann:[]};
+  modelInfo = BUILD[selFit](m, selSize, f);
+  // 置中：以所有頂點 bbox 中心平移，並算 modelR
+  let lo=[1e9,1e9,1e9], hi=[-1e9,-1e9,-1e9];
+  for(const fa of m.q) for(const p of fa.v) for(let k=0;k<3;k++){ if(p[k]<lo[k])lo[k]=p[k]; if(p[k]>hi[k])hi[k]=p[k]; }
+  const c=[(lo[0]+hi[0])/2,(lo[1]+hi[1])/2,(lo[2]+hi[2])/2];
+  const shift=p=>[p[0]-c[0],p[1]-c[1],p[2]-c[2]];
+  for(const fa of m.q) fa.v=fa.v.map(shift);
+  for(const an of m.ann){ if(an.a)an.a=shift(an.a); if(an.b)an.b=shift(an.b); if(an.c)an.c=shift(an.c); if(an.v)an.v=shift(an.v); if(an.at)an.at=shift(an.at); }
+  let R=1; for(const fa of m.q) for(const p of fa.v){ const d=Math.hypot(p[0],p[1],p[2]); if(d>R)R=d; }
+  m.R=R; model=m;
+  document.getElementById('infoLine').innerHTML = modelInfo;
 }
 
-/* ── 展示台組裝：5×3 ── */
-const COLS3 = 5, SPACE = 8.2;
-const groups = [];      // {fit, root, pedestal, label}
-FITTINGS.forEach((f,i)=>{
-  const root = new THREE.Group();
-  root.position.set((i%COLS3-2)*SPACE, 0, (Math.floor(i/COLS3)-1)*SPACE);
-  const model = BUILD3D[f.id]();
-  model.scale.setScalar(1.35);
-  root.add(model);
-  const ped = new THREE.Mesh(
-    new THREE.CylinderGeometry(3.0,3.2,.22,44),
-    new THREE.MeshStandardMaterial({color:0xe2e8ee, metalness:.1, roughness:.85}));
-  ped.position.y = -2.55;
-  root.add(ped);
-  const label = makeLabel(f.name, dimText(f));
-  label.position.y = -3.6;
-  root.add(label);
-  root.traverse(o=>{ o.userData.fid = f.id; });
-  scene.add(root);
-  groups.push({fit:f, root, ped, label});
-});
-
-/* ── 口徑切換：重做標籤文字＋說明欄 ── */
-function refreshLabels(){
-  groups.forEach(g=>{
-    const spr = makeLabel(g.fit.name, dimText(g.fit));
-    spr.position.copy(g.label.position);
-    g.root.remove(g.label);
-    g.label.material.map.dispose(); g.label.material.dispose();
-    g.root.add(spr);
-    g.label = spr;
-    spr.userData.fid = g.fit.id;
-  });
+/* ═══════════════ 渲染（自寫軟體渲染） ═══════════════ */
+function rot(p){
+  const cA=Math.cos(view.ry), sA=Math.sin(view.ry), cB=Math.cos(view.rx), sB=Math.sin(view.rx);
+  const x1=p[0]*cA+p[2]*sA, z1=-p[0]*sA+p[2]*cA;
+  const y2=p[1]*cB-z1*sB, z2=p[1]*sB+z1*cB;
+  return [x1,y2,z2];
 }
-function refreshSelection(){
-  groups.forEach(g=>{
-    g.ped.material.color.set(g.fit.id===selFit ? 0xffd966 : 0xe2e8ee);
-  });
-}
-function renderPanel(){
-  const f = FITTINGS.find(x=>x.id===selFit);
-  document.getElementById('panel').innerHTML = panelHTML(f, selSize);
+let VP={s:1,cx:0,cy:0};
+function project(p){ const r=rot(p); return [VP.cx+r[0]*VP.s, VP.cy+r[1]*VP.s, r[2]]; }
+
+function render(){
+  const dpr=Math.min(window.devicePixelRatio||1, 2);
+  const W=canvas.clientWidth, H=canvas.clientHeight;
+  if(canvas.width!==Math.floor(W*dpr)){ canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr); }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  if(!model||W<10) return;
+  VP.s=Math.min(W,H)/(2.6*model.R)*view.zoom; VP.cx=W/2; VP.cy=H/2;
+  const light=[-0.32,-0.5,-0.8];
+
+  // 實體面：旋轉→法線光照→遠先畫
+  const faces=[];
+  for(const fa of model.q){
+    const P=fa.v.map(rot);
+    const u=[P[1][0]-P[0][0],P[1][1]-P[0][1],P[1][2]-P[0][2]];
+    const v=[P[2][0]-P[0][0],P[2][1]-P[0][1],P[2][2]-P[0][2]];
+    let n=[u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]];
+    const nl=Math.hypot(n[0],n[1],n[2])||1; if(n[2]>0)n=[-n[0],-n[1],-n[2]];
+    const sh=Math.max(0.12,(n[0]*light[0]+n[1]*light[1]+n[2]*light[2])/nl);
+    let z=0; for(const q of P) z+=q[2]; z/=P.length;
+    faces.push({P,z,sh,t:fa.t});
+  }
+  faces.sort((a,b)=>a.z-b.z);
+  for(const f of faces){
+    const [r,g,b]=f.t;
+    ctx.fillStyle=`rgb(${Math.round(r*f.sh)},${Math.round(g*f.sh)},${Math.round(b*f.sh)})`;
+    ctx.beginPath(); ctx.moveTo(VP.cx+f.P[0][0]*VP.s, VP.cy+f.P[0][1]*VP.s);
+    for(let i=1;i<f.P.length;i++) ctx.lineTo(VP.cx+f.P[i][0]*VP.s, VP.cy+f.P[i][1]*VP.s);
+    ctx.closePath(); ctx.fill();
+  }
+  if(showDims&&model.ann.length) drawAnnotations();
 }
 
-/* ── 點選（區分旋轉拖曳與點擊） ── */
-const ray = new THREE.Raycaster();
-let downPos = null;
-canvas.addEventListener('pointerdown', e=>{ downPos = {x:e.clientX, y:e.clientY}; });
-canvas.addEventListener('pointerup', e=>{
-  if(!downPos) return;
-  const moved = Math.hypot(e.clientX-downPos.x, e.clientY-downPos.y);
-  downPos = null;
-  if(moved > 6) return;              // 是拖曳不是點擊
-  const r = canvas.getBoundingClientRect();
-  const p = new THREE.Vector2(
-    (e.clientX-r.left)/r.width*2-1, -((e.clientY-r.top)/r.height*2-1));
-  ray.setFromCamera(p, camera);
-  const hits = ray.intersectObjects(scene.children, true);
-  const hit = hits.find(h=>h.object.userData.fid);
-  if(hit){ selFit = hit.object.userData.fid; refreshSelection(); renderPanel(); }
-});
-canvas.addEventListener('dblclick', e=>{
-  const g = groups.find(x=>x.fit.id===selFit);
-  if(!g) return;
-  controls.target.copy(g.root.position);
-  const dir = new THREE.Vector3(0,3.2,7.5);
-  camera.position.copy(g.root.position).add(dir);
-});
-document.getElementById('btnReset').onclick = ()=>{
-  controls.target.set(0,0,0);
-  camera.position.set(0,18,34);
-};
-document.getElementById('btnSpin').onclick = function(){
-  controls.autoRotate = !controls.autoRotate;
-  controls.autoRotateSpeed = 1.2;
-  this.style.borderColor = controls.autoRotate ? 'var(--accent)' : '';
-  this.style.color = controls.autoRotate ? 'var(--accent)' : '';
-};
+/* ── 標註繪製 ── */
+function arrow(x1,y1,x2,y2,col){
+  ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=1.4;
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  const head=(hx,hy,fromx,fromy)=>{ const a=Math.atan2(hy-fromy,hx-fromx),L=7;
+    ctx.beginPath(); ctx.moveTo(hx,hy);
+    ctx.lineTo(hx-L*Math.cos(a-0.4),hy-L*Math.sin(a-0.4));
+    ctx.lineTo(hx-L*Math.cos(a+0.4),hy-L*Math.sin(a+0.4)); ctx.closePath(); ctx.fill(); };
+  head(x2,y2,x1,y1); head(x1,y1,x2,y2);
+}
+function chip(x,y,txt,col){
+  ctx.font='bold 13px "Microsoft JhengHei",sans-serif';
+  const w=ctx.measureText(txt).width+10;
+  ctx.fillStyle='rgba(11,18,32,0.82)';
+  ctx.beginPath(); ctx.roundRect(x-w/2,y-10,w,19,5); ctx.fill();
+  ctx.fillStyle=col; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(txt,x,y+0.5);
+}
+const DIMC='#ffce6b', ANGC='#7fd4ff', NOTEC='#a8ffcf';
+function drawAnnotations(){
+  const cx=VP.cx, cy=VP.cy;
+  for(const an of model.ann){
+    if(an.k==='dim'||an.k==='diam'){
+      let A,B,col=DIMC,txt=an.txt;
+      if(an.k==='dim'){ A=project(an.a); B=project(an.b); }
+      else { // diameter：取垂直於軸的一條直徑線
+        const c=an.c, r=an.r;
+        const d1 = an.ax==='x'?[c[0],c[1]+r,c[2]] : [c[0]+r,c[1],c[2]];
+        const d2 = an.ax==='x'?[c[0],c[1]-r,c[2]] : [c[0]-r,c[1],c[2]];
+        A=project(d1); B=project(d2);
+      }
+      const mx=(A[0]+B[0])/2,my=(A[1]+B[1])/2;
+      let px=-(B[1]-A[1]),py=(B[0]-A[0]); const pl=Math.hypot(px,py)||1; px/=pl; py/=pl;
+      if((mx-cx)*px+(my-cy)*py<0){px=-px;py=-py;}
+      const off=an.k==='diam'?4:30;
+      const A2=[A[0]+px*off,A[1]+py*off], B2=[B[0]+px*off,B[1]+py*off];
+      ctx.strokeStyle='rgba(255,206,107,0.5)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(A2[0],A2[1]); ctx.moveTo(B[0],B[1]); ctx.lineTo(B2[0],B2[1]); ctx.stroke();
+      arrow(A2[0],A2[1],B2[0],B2[1],col);
+      chip((A2[0]+B2[0])/2+px*10,(A2[1]+B2[1])/2+py*10,txt,col);
+    }
+    else if(an.k==='angle'){
+      const V=project(an.v),A=project(an.a),B=project(an.b);
+      let a1=Math.atan2(A[1]-V[1],A[0]-V[0]), a2=Math.atan2(B[1]-V[1],B[0]-V[0]);
+      const rr=34;
+      ctx.strokeStyle=ANGC; ctx.lineWidth=1.4;
+      ctx.beginPath(); ctx.moveTo(V[0],V[1]); ctx.lineTo(V[0]+rr*Math.cos(a1),V[1]+rr*Math.sin(a1));
+      ctx.moveTo(V[0],V[1]); ctx.lineTo(V[0]+rr*Math.cos(a2),V[1]+rr*Math.sin(a2)); ctx.stroke();
+      let d=a2-a1; while(d<=-Math.PI)d+=2*Math.PI; while(d>Math.PI)d-=2*Math.PI;
+      ctx.beginPath(); ctx.arc(V[0],V[1],rr,a1,a1+d,d<0); ctx.stroke();
+      const mid=a1+d/2; chip(V[0]+(rr+14)*Math.cos(mid),V[1]+(rr+14)*Math.sin(mid),an.txt,ANGC);
+    }
+    else if(an.k==='note'){
+      const P=project(an.at); chip(P[0],P[1],an.txt,NOTEC);
+    }
+  }
+}
+if(!CanvasRenderingContext2D.prototype.roundRect){
+  CanvasRenderingContext2D.prototype.roundRect=function(x,y,w,h,r){
+    this.moveTo(x+r,y); this.arcTo(x+w,y,x+w,y+h,r); this.arcTo(x+w,y+h,x,y+h,r);
+    this.arcTo(x,y+h,x,y,r); this.arcTo(x,y,x+w,y,r); return this; };
+}
 
-/* ── 口徑列／對照表（與 2D 相同） ── */
+/* ═══════════════ 迴圈與互動 ═══════════════ */
+function tick(){ if(view.auto) view.ry+=0.011; render(); }
+function startLoop(){ clearInterval(view.timer); view.timer=setInterval(tick,33); }
+
+{
+  const ps=new Map(); let pinch=0;
+  canvas.addEventListener('pointerdown',e=>{ try{canvas.setPointerCapture(e.pointerId);}catch(_){}
+    ps.set(e.pointerId,{x:e.clientX,y:e.clientY}); view.auto=false; canvas.classList.add('drag');
+    if(ps.size===2){ const[a,b]=[...ps.values()]; pinch=Math.hypot(a.x-b.x,a.y-b.y); } });
+  canvas.addEventListener('pointermove',e=>{ if(!ps.has(e.pointerId))return;
+    const prev=ps.get(e.pointerId),cur={x:e.clientX,y:e.clientY}; ps.set(e.pointerId,cur);
+    if(ps.size===1){ view.ry+=(cur.x-prev.x)*0.008; view.rx+=(cur.y-prev.y)*0.008; view.rx=Math.max(-1.5,Math.min(1.5,view.rx)); }
+    else if(ps.size===2){ const[a,b]=[...ps.values()],nd=Math.hypot(a.x-b.x,a.y-b.y);
+      if(pinch>0)view.zoom=Math.min(6,Math.max(0.3,view.zoom*nd/pinch)); pinch=nd; } });
+  const up=e=>{ ps.delete(e.pointerId); pinch=0; canvas.classList.remove('drag'); };
+  canvas.addEventListener('pointerup',up); canvas.addEventListener('pointercancel',up);
+  canvas.addEventListener('wheel',e=>{ e.preventDefault(); view.zoom=Math.min(6,Math.max(0.3,view.zoom*Math.exp(-e.deltaY*0.0015))); },{passive:false});
+}
+document.getElementById('btnSpin').onclick=function(){ view.auto=!view.auto; this.classList.toggle('on',view.auto); };
+document.getElementById('btnDims').onclick=function(){ showDims=!showDims; this.classList.toggle('on',showDims); buildModel(); };
+document.getElementById('btnReset').onclick=()=>{ view.rx=-0.42; view.ry=0.7; view.zoom=1; };
+document.getElementById('zin').onclick=()=>view.zoom=Math.min(6,view.zoom*1.25);
+document.getElementById('zout').onclick=()=>view.zoom=Math.max(0.3,view.zoom/1.25);
+
+/* ═══════════════ 選單／面板／對照表 ═══════════════ */
 function renderSizeBar(){
-  const bar = document.getElementById('sizeBar');
-  bar.innerHTML = '';
-  SIZES.forEach(s=>{
-    const b = document.createElement('button');
-    b.textContent = s.fen;
-    b.title = `${s.b}／${s.a}`;
-    b.className = s.key===selSize.key ? 'on' : '';
-    b.onclick = ()=>{ selSize=s; renderSizeBar(); refreshLabels(); renderPanel(); };
-    bar.appendChild(b);
-  });
+  const bar=document.getElementById('sizeBar'); bar.innerHTML='';
+  SIZES.forEach(s=>{ const b=document.createElement('button'); b.textContent=s.fen; b.title=`${s.b}／${s.a}`;
+    b.className=s.key===selSize.key?'on':''; b.onclick=()=>{ selSize=s; renderSizeBar(); buildModel(); renderPanel(); }; bar.appendChild(b); });
 }
-document.getElementById('btnTable').onclick = ()=>{
-  const rows = SIZES.map(s=>`<tr>
-    <td>${s.fen}</td><td>${s.b}</td><td>${s.a}</td><td>DN${s.a.replace('A','')}</td>
+function renderFitBar(){
+  const bar=document.getElementById('fitBar'); bar.innerHTML='';
+  FITTINGS.forEach(f=>{ const b=document.createElement('button'); b.textContent=f.name;
+    b.className=f.id===selFit?'on':''; b.onclick=()=>{ selFit=f.id; renderFitBar(); view.rx=-0.42; view.ry=0.7; view.zoom=1; buildModel(); renderPanel(); }; bar.appendChild(b); });
+}
+function renderPanel(){ const f=FITTINGS.find(x=>x.id===selFit); document.getElementById('panel').innerHTML=panelHTML(f, selSize); }
+document.getElementById('btnTable').onclick=()=>{
+  const rows=SIZES.map(s=>`<tr><td>${s.fen}</td><td>${s.b}</td><td>${s.a}</td><td>DN${s.a.replace('A','')}</td>
     <td>${s.od}</td><td>${s.t}</td><td>${s.kg}</td><td>${s.aod}</td></tr>`).join('');
-  document.getElementById('pipeTable').innerHTML = `<table>
+  document.getElementById('pipeTable').innerHTML=`<table>
     <tr><th>台制俗稱</th><th>英吋 (B)</th><th>JIS/CNS (A)</th><th>DN</th>
-        <th>SGP 外徑 mm</th><th>SGP 厚度 mm</th><th>重量 kg/m</th><th>ASME 外徑 mm</th></tr>
-    ${rows}</table>`;
+        <th>SGP 外徑 mm</th><th>SGP 厚度 mm</th><th>重量 kg/m</th><th>ASME 外徑 mm</th></tr>${rows}</table>`;
   document.getElementById('modal').classList.add('show');
 };
 
-/* ── 渲染迴圈 ── */
-function resize(){
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  if(canvas.width!==Math.floor(w*renderer.getPixelRatio()) || canvas.height!==Math.floor(h*renderer.getPixelRatio())){
-    renderer.setSize(w, h, false);
-    camera.aspect = w/h;
-    camera.updateProjectionMatrix();
-  }
-}
-function loop(){
-  resize();
-  controls.update();
-  renderer.render(scene, camera);
-  requestAnimationFrame(loop);
-}
-renderSizeBar();
-refreshSelection();
-renderPanel();
-loop();
+/* ── 啟動 ── */
+renderSizeBar(); renderFitBar(); buildModel(); renderPanel(); startLoop();
 </script>
 </body>
 </html>
