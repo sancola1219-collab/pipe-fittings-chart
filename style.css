@@ -1,0 +1,82 @@
+/* 共用樣式：index.html（2D）與 3d.html（3D）共用 */
+:root{
+  --ink:#2c3e50; --pipe-dark:#3b5468; --pipe-light:#cfe0ef;
+  --dim:#c0392b; --accent:#1f6feb; --bg:#f4f6f8; --card:#ffffff;
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+html,body{height:100%; overflow:hidden;}
+body{
+  font-family:"Microsoft JhengHei","PingFang TC",system-ui,sans-serif;
+  background:var(--bg); color:var(--ink); display:flex; flex-direction:column;
+}
+header{
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  padding:8px 14px; background:#fff; border-bottom:2px solid #dde3e9; z-index:5;
+}
+header h1{font-size:18px; letter-spacing:2px; white-space:nowrap;}
+header .sub{font-size:11px; color:#8a97a5; letter-spacing:1px;}
+#sizeBar{display:flex; gap:4px; flex-wrap:wrap;}
+#sizeBar button{
+  border:1px solid #c7d0d9; background:#fff; border-radius:6px;
+  padding:4px 9px; font-size:13px; cursor:pointer; font-family:inherit;
+}
+#sizeBar button:hover{border-color:var(--accent);}
+#sizeBar button.on{background:var(--accent); color:#fff; border-color:var(--accent); font-weight:bold;}
+#search{
+  border:1px solid #c7d0d9; border-radius:6px; padding:5px 10px;
+  font-size:13px; width:150px; font-family:inherit;
+}
+.toolBtn{
+  border:1px solid #c7d0d9; background:#fff; border-radius:6px;
+  padding:5px 10px; font-size:13px; cursor:pointer; font-family:inherit;
+  text-decoration:none; color:var(--ink); display:inline-block;
+}
+.toolBtn:hover{border-color:var(--accent); color:var(--accent);}
+#main{flex:1; display:flex; min-height:0;}
+#canvasWrap{flex:1; position:relative; min-width:0;}
+#hint{
+  position:absolute; left:14px; bottom:14px; font-size:11px; color:#8a97a5;
+  background:rgba(255,255,255,.85); padding:4px 8px; border-radius:6px; pointer-events:none;
+}
+/* ── 右側說明欄 ── */
+#panel{
+  width:340px; background:var(--card); border-left:2px solid #dde3e9;
+  overflow-y:auto; padding:14px; flex-shrink:0;
+}
+#panel h2{font-size:19px; margin-bottom:2px;}
+#panel .en{color:#8a97a5; font-size:12px; margin-bottom:10px; letter-spacing:.5px;}
+.infoRow{margin-bottom:10px; font-size:13px; line-height:1.6;}
+.infoRow b{
+  display:inline-block; background:#eef3f8; color:#40576d; border-radius:4px;
+  padding:0 6px; margin-right:6px; font-size:12px;
+}
+.tag{
+  display:inline-block; background:#e8f1fd; color:#1f5fc9; border-radius:10px;
+  padding:1px 9px; font-size:12px; margin:2px 3px 2px 0;
+}
+#panel table{width:100%; border-collapse:collapse; font-size:12px; margin-top:6px;}
+#panel th,#panel td{
+  border:1px solid #dde3e9; padding:3px 5px; text-align:center; white-space:nowrap;
+}
+#panel th{background:#eef3f8; font-weight:600;}
+#panel tr.hl td{background:#fff3d6; font-weight:bold;}
+.note{font-size:11px; color:#9aa6b2; margin-top:8px; line-height:1.5;}
+/* ── 對照表彈窗 ── */
+#modal{
+  position:fixed; inset:0; background:rgba(30,40,50,.45); display:none;
+  align-items:center; justify-content:center; z-index:20;
+}
+#modal.show{display:flex;}
+#modalBox{
+  background:#fff; border-radius:12px; padding:20px; max-width:92vw;
+  max-height:88vh; overflow:auto; box-shadow:0 10px 40px rgba(0,0,0,.3);
+}
+#modalBox h2{font-size:17px; margin-bottom:10px;}
+#modalBox table{border-collapse:collapse; font-size:13px;}
+#modalBox th,#modalBox td{border:1px solid #cfd8e0; padding:5px 10px; text-align:center; white-space:nowrap;}
+#modalBox th{background:#eef3f8;}
+#modalBox tr:nth-child(even) td{background:#f8fafc;}
+#modalBox .close{float:right;}
+@media (max-width:800px){
+  #panel{position:absolute; right:0; top:0; bottom:0; box-shadow:-4px 0 12px rgba(0,0,0,.15);}
+}
